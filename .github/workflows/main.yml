@@ -55,9 +55,21 @@ jobs:
       - name: 📦 Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Install Playwright + Chromium (replaces manual Chrome install) ──────
-      - name: 🌐 Install Playwright browsers
-        run: python -m playwright install chromium --with-deps
+      # ── 4. Install Playwright + Chromium ──────────────────────────────────────
+      # Ubuntu 24.04 renamed libasound2 → libasound2t64, breaking --with-deps.
+      # Workaround: install deps manually then install browser only.
+      - name: 🌐 Install Chromium system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libasound2t64 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+            libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 \
+            libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
+            libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+            xvfb fonts-liberation libvulkan1
+
+      - name: 🌐 Install Playwright Chromium browser
+        run: python -m playwright install chromium
 
       # ── 5. Configure AWS credentials ──────────────────────────────────────────
       - name: 🔐 Configure AWS credentials
