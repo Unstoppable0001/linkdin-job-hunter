@@ -100,8 +100,17 @@ class LinkedInScraper:
                 "Add it as a GitHub Secret — see linkedin_scraper.py docstring."
             )
 
-        # Inject cookies before navigating to LinkedIn
         context = page.context
+
+        # Must visit the domain first so cookies are anchored correctly
+        await page.goto("https://www.linkedin.com", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(1.0, 1.5))
+
+        # Inject cookies after domain is established
+        # JSESSIONID must be wrapped in quotes e.g. "ajax:1234567890"
+        if jsessionid and not jsessionid.startswith('"'):
+            jsessionid = f'"{jsessionid}"'
+
         await context.add_cookies([
             {
                 "name":     "li_at",
