@@ -1,25 +1,37 @@
 """
-linkedin_scraper.py — Scrapes LinkedIn Jobs using Playwright (headless browser)
-Bypasses basic bot detection with realistic delays and user-agent rotation.
-Uses cookie-based auth to avoid LinkedIn's CAPTCHA on cloud IPs.
+linkedin_scraper.py — Scrapes LinkedIn Jobs using the public guest API + httpx.
+No login required. No Playwright redirects. Fast and reliable.
+
+LinkedIn guest API:
+  https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
+  Returns paginated HTML job cards — no auth needed.
 """
 
 import asyncio
-import random
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
 from urllib.parse import quote
-from playwright.async_api import async_playwright, Page
+
+import httpx
+from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
-]
+GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+JOB_DETAIL_URL   = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
 @dataclass
@@ -43,244 +55,101 @@ class LinkedInScraper:
         self.jobs: List[Job] = []
 
     async def fetch_jobs(self) -> List[Job]:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--disable-infobars",
-                    "--disable-extensions",
-                ],
-            )
-            context = await browser.new_context(
-                user_agent=random.choice(USER_AGENTS),
-                viewport={"width": 1280, "height": 900},
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            )
-            await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page = await context.new_page()
-
-            await self._login(page)
-
+        async with httpx.AsyncClient(headers=HEADERS, timeout=20, follow_redirects=True) as client:
             for keyword in self.cfg["search_keywords"]:
-                await self._search_keyword(page, keyword.strip())
-                await asyncio.sleep(random.uniform(2, 4))
-
-            await browser.close()
+                await self._search_keyword(client, keyword.strip())
+                await asyncio.sleep(2)
 
         log.info(f"  Scraper: collected {len(self.jobs)} jobs total")
         return self.jobs
 
-    # ── Private helpers ───────────────────────────────────────────────────────
+    async def _search_keyword(self, client: httpx.AsyncClient, keyword: str):
+        location        = self.cfg.get("location", "India")
+        max_pages       = self.cfg.get("max_pages", 5)
+        freshness_secs  = self.cfg.get("freshness_minutes", 180) * 60
 
-    async def _inject_cookies(self, page: Page):
-        """
-        Inject LinkedIn session cookies into the browser context.
+        for page_num in range(max_pages):
+            params = {
+                "keywords": keyword,
+                "location": location,
+                "f_TPR":    f"r{freshness_secs}",   # posted within freshness window
+                "f_E":      "1,2",                   # Entry level + Internship
+                "sortBy":   "DD",                    # Most recent
+                "start":    page_num * 25,
+            }
 
-        How to get your cookies:
-          1. Log into LinkedIn in Chrome
-          2. DevTools → Application → Cookies → linkedin.com
-          3. Copy li_at and JSESSIONID values
-          4. Store as GitHub Secrets: LINKEDIN_LI_AT, LINKEDIN_JSESSIONID
-        """
-        li_at      = self.cfg.get("linkedin_li_at", "")
-        jsessionid = self.cfg.get("linkedin_jsessionid", "")
-
-        if not li_at:
-            raise RuntimeError(
-                "LINKEDIN_LI_AT cookie not set. "
-                "Add it as a GitHub Secret — see linkedin_scraper.py docstring."
-            )
-
-        # JSESSIONID must be wrapped in quotes e.g. "ajax:1234567890"
-        if jsessionid and not jsessionid.startswith('"'):
-            jsessionid = f'"{jsessionid}"'
-
-        await page.context.add_cookies([
-            {
-                "name":     "li_at",
-                "value":    li_at,
-                "domain":   ".linkedin.com",
-                "path":     "/",
-                "secure":   True,
-                "httpOnly": True,
-                "sameSite": "None",
-            },
-            {
-                "name":     "JSESSIONID",
-                "value":    jsessionid,
-                "domain":   ".linkedin.com",
-                "path":     "/",
-                "secure":   True,
-                "httpOnly": False,
-                "sameSite": "None",
-            },
-        ])
-
-    async def _login(self, page: Page):
-        """Authenticate via LinkedIn session cookies."""
-        # Step 1: Visit domain to anchor cookies
-        await page.goto("https://www.linkedin.com", wait_until="domcontentloaded", timeout=20000)
-        await asyncio.sleep(random.uniform(1.0, 1.5))
-
-        # Step 2: Inject cookies
-        await self._inject_cookies(page)
-
-        # Step 3: Navigate to feed to verify session
-        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
-        await asyncio.sleep(random.uniform(1.5, 2.5))
-
-        current_url = page.url
-        if "feed" in current_url or "mynetwork" in current_url:
-            log.info("  LinkedIn cookie auth successful ✅")
-        elif "login" in current_url or "checkpoint" in current_url:
-            raise RuntimeError(
-                "LinkedIn cookie auth failed — cookies may be expired. "
-                "Re-extract li_at and JSESSIONID from your browser and update GitHub Secrets."
-            )
-        else:
-            log.warning(f"  LinkedIn landed on: {current_url} — proceeding anyway")
-
-    async def _search_keyword(self, page: Page, keyword: str):
-        location = self.cfg["location"]
-        # URL modelled from real LinkedIn search:
-        # f_TPR=r10800  → posted in last N seconds (3 hrs = 10800, 24hrs = 86400)
-        # f_E=1,2       → Entry level + Internship
-        # sortBy=DD     → Most recent first
-        freshness_secs = self.cfg.get("freshness_minutes", 180) * 60
-        base_url = (
-            f"https://www.linkedin.com/jobs/search/"
-            f"?keywords={quote(keyword)}"
-            f"&location={quote(location)}"
-            f"&f_TPR=r{freshness_secs}"   # only jobs posted within our freshness window
-            f"&f_E=1%2C2"                 # Entry level + Internship
-            f"&sortBy=DD"                 # Most recent first
-            f"&origin=JOB_SEARCH_PAGE_JOB_FILTER"
-        )
-
-        for page_num in range(self.cfg["max_pages"]):
-            paginated = base_url + f"&start={page_num * 25}"
-            log.info(f"  Searching: '{keyword}' page {page_num + 1}")
-
-            # Retry once on failure (handles transient redirect/session drops)
-            for attempt in range(2):
-                try:
-                    await page.goto(paginated, wait_until="domcontentloaded", timeout=25000)
-
-                    # Re-authenticate if session dropped mid-run
-                    if "login" in page.url or "checkpoint" in page.url or "authwall" in page.url:
-                        log.warning("  Session dropped — re-injecting cookies and retrying")
-                        await self._inject_cookies(page)
-                        await asyncio.sleep(2)
-                        await page.goto(paginated, wait_until="domcontentloaded", timeout=25000)
-
-                    break  # success — exit retry loop
-
-                except Exception as e:
-                    if attempt == 0:
-                        log.warning(f"  Page load failed (attempt 1): {e} — retrying")
-                        await asyncio.sleep(4)
-                    else:
-                        log.error(f"  Skipping '{keyword}' page {page_num + 1}: {e}")
-                        break
-
-            await asyncio.sleep(random.uniform(2, 3))
-
-            # Scroll to trigger lazy loading
             try:
-                await page.wait_for_load_state("domcontentloaded")
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1.5)
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1)
+                resp = await client.get(GUEST_SEARCH_URL, params=params)
+                resp.raise_for_status()
             except Exception as e:
-                log.debug(f"  Scroll skipped: {e}")
-
-            # Try multiple selectors — LinkedIn changes class names frequently
-            job_cards = []
-            for sel in [
-                "li[data-occludable-job-id]",
-                ".job-card-container",
-                ".jobs-search-results__list-item",
-                ".scaffold-layout__list-item",
-                "[data-job-id]",
-            ]:
-                job_cards = await page.query_selector_all(sel)
-                if job_cards:
-                    log.info(f"  Selector matched: '{sel}' → {len(job_cards)} cards")
-                    break
-
-            log.info(f"  Found {len(job_cards)} cards for '{keyword}' page {page_num + 1}")
-
-            # Save screenshot on first page for debugging
-            if page_num == 0:
-                try:
-                    screenshot_path = f"debug_{keyword.replace(' ', '_')}_p1.png"
-                    await page.screenshot(path=screenshot_path, full_page=False)
-                    log.info(f"  📸 Screenshot saved: {screenshot_path}")
-                except Exception as se:
-                    log.debug(f"  Screenshot failed: {se}")
-
-            if not job_cards:
-                log.info(f"  No cards found — stopping pagination for '{keyword}'")
+                log.warning(f"  Search failed for '{keyword}' page {page_num + 1}: {e}")
                 break
 
-            for card in job_cards:
-                job = await self._parse_card(page, card)
+            soup  = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.find_all("li")
+            log.info(f"  '{keyword}' page {page_num + 1}: {len(cards)} cards")
+
+            if not cards:
+                break
+
+            for card in cards:
+                job = await self._parse_card(client, card, keyword)
                 if job:
                     self.jobs.append(job)
 
-    async def _parse_card(self, page: Page, card) -> Job | None:
+            await asyncio.sleep(1.5)
+
+    async def _parse_card(self, client: httpx.AsyncClient, card, keyword: str) -> "Job | None":
         try:
-            await card.click()
-            await asyncio.sleep(random.uniform(0.8, 1.5))
+            # ── Extract job ID ────────────────────────────────────────────────
+            job_id = None
+            base_card = card.find("div", {"data-entity-urn": True})
+            if base_card:
+                urn = base_card["data-entity-urn"]
+                job_id = urn.split(":")[-1]
+            if not job_id:
+                link = card.find("a", href=re.compile(r"/jobs/view/(\d+)"))
+                if link:
+                    m = re.search(r"/jobs/view/(\d+)", link["href"])
+                    job_id = m.group(1) if m else None
+            if not job_id:
+                return None
 
-            detail = page.locator(".jobs-details")
+            # ── Basic info from card ──────────────────────────────────────────
+            title_el   = card.find("h3", class_=re.compile("base-search-card__title|job-card"))
+            company_el = card.find("h4", class_=re.compile("base-search-card__subtitle"))
+            loc_el     = card.find("span", class_=re.compile("job-search-card__location|base-search-card__metadata"))
+            time_el    = card.find("time")
 
-            # Title — try multiple selectors
-            title = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-title")
-            if title == "N/A":
-                title = await self._safe_text(detail, ".jobs-unified-top-card__job-title")
-            if title == "N/A":
-                title = await self._safe_text(page, "h1")
-
-            # Company
-            company = await self._safe_text(detail, ".job-details-jobs-unified-top-card__company-name")
-            if company == "N/A":
-                company = await self._safe_text(detail, ".jobs-unified-top-card__company-name")
-
-            # Location
-            location = await self._safe_text(detail, ".job-details-jobs-unified-top-card__bullet")
-            if location == "N/A":
-                location = await self._safe_text(detail, ".jobs-unified-top-card__bullet")
-
-            # Description
-            desc = await self._safe_text(detail, ".jobs-description-content__text")
-            if desc == "N/A":
-                desc = await self._safe_text(detail, ".jobs-description__content")
-            if desc == "N/A":
-                desc = await self._safe_text(detail, "#job-details")
-
-            # Posted date
-            posted = await self._safe_text(detail, ".job-details-jobs-unified-top-card__posted-date")
-            if posted == "N/A":
-                posted = await self._safe_text(detail, ".jobs-unified-top-card__posted-date")
-            if posted == "N/A":
-                posted = await self._safe_text(detail, "span[class*='posted-date']")
-
-            # Salary (optional)
-            salary = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-insight span", default="")
-
-            job_url = page.url
-            job_id  = job_url.split("/jobs/view/")[-1].split("?")[0] if "/jobs/view/" in job_url else job_url[-12:]
+            title    = title_el.get_text(strip=True)   if title_el   else "N/A"
+            company  = company_el.get_text(strip=True) if company_el else "N/A"
+            location = loc_el.get_text(strip=True)     if loc_el     else "N/A"
+            posted   = time_el.get("datetime", time_el.get_text(strip=True)) if time_el else "N/A"
 
             if title == "N/A" and company == "N/A":
-                log.debug(f"  Skipping card — could not parse title/company from {job_url}")
                 return None
+
+            # ── Fetch full job description ────────────────────────────────────
+            desc = ""
+            try:
+                detail_resp = await client.get(JOB_DETAIL_URL.format(job_id=job_id))
+                detail_resp.raise_for_status()
+                detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
+
+                desc_el = (
+                    detail_soup.find("div", class_=re.compile("description__text")) or
+                    detail_soup.find("section", class_=re.compile("description")) or
+                    detail_soup.find("div", {"id": "job-details"})
+                )
+                desc = desc_el.get_text(separator=" ", strip=True) if desc_el else ""
+
+                salary_el = detail_soup.find("div", class_=re.compile("salary|compensation"))
+                salary    = salary_el.get_text(strip=True) if salary_el else ""
+            except Exception as e:
+                log.debug(f"  Detail fetch failed for {job_id}: {e}")
+                salary = ""
+
+            await asyncio.sleep(0.5)
 
             return Job(
                 job_id=job_id,
@@ -288,18 +157,11 @@ class LinkedInScraper:
                 company=company,
                 location=location,
                 description=desc,
-                url=job_url,
+                url=f"https://www.linkedin.com/jobs/view/{job_id}/",
                 posted_at=posted,
                 salary=salary,
             )
+
         except Exception as e:
             log.debug(f"  Card parse error: {e}")
             return None
-
-    @staticmethod
-    async def _safe_text(parent, selector: str, default: str = "N/A") -> str:
-        try:
-            el = parent.locator(selector).first
-            return (await el.inner_text()).strip()
-        except Exception:
-            return default
