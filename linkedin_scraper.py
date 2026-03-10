@@ -77,40 +77,66 @@ class LinkedInScraper:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     async def _login(self, page: Page):
-        """Log into LinkedIn once per session with bot-detection evasion."""
-        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+        """
+        Authenticate via saved LinkedIn session cookies (li_at + JSESSIONID).
+
+        Why cookies instead of email/password:
+        LinkedIn aggressively challenges headless browsers from cloud IPs
+        (GitHub Actions, AWS, etc.) with CAPTCHA/checkpoint pages that cannot
+        be solved programmatically. Cookie-based auth bypasses this entirely.
+
+        How to get your cookies:
+          1. Log into LinkedIn in Chrome
+          2. DevTools → Application → Cookies → linkedin.com
+          3. Copy li_at and JSESSIONID values
+          4. Store as GitHub Secrets: LINKEDIN_LI_AT, LINKEDIN_JSESSIONID
+        """
+        li_at      = self.cfg.get("linkedin_li_at", "")
+        jsessionid = self.cfg.get("linkedin_jsessionid", "")
+
+        if not li_at:
+            raise RuntimeError(
+                "LINKEDIN_LI_AT cookie not set. "
+                "Add it as a GitHub Secret — see linkedin_scraper.py docstring."
+            )
+
+        # Inject cookies before navigating to LinkedIn
+        context = page.context
+        await context.add_cookies([
+            {
+                "name":     "li_at",
+                "value":    li_at,
+                "domain":   ".linkedin.com",
+                "path":     "/",
+                "secure":   True,
+                "httpOnly": True,
+                "sameSite": "None",
+            },
+            {
+                "name":     "JSESSIONID",
+                "value":    jsessionid,
+                "domain":   ".linkedin.com",
+                "path":     "/",
+                "secure":   True,
+                "httpOnly": False,
+                "sameSite": "None",
+            },
+        ])
+
+        # Navigate to feed to verify session is valid
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
-        # Type credentials like a human (char by char with random delays)
-        await page.click("#username")
-        await page.type("#username", self.cfg["linkedin_email"], delay=random.randint(50, 120))
-        await asyncio.sleep(random.uniform(0.5, 1.0))
-        await page.click("#password")
-        await page.type("#password", self.cfg["linkedin_password"], delay=random.randint(50, 120))
-        await asyncio.sleep(random.uniform(0.5, 1.0))
-        await page.click('[type="submit"]')
-
-        # Wait up to 30s — LinkedIn may show security check / captcha page first
-        try:
-            await page.wait_for_url("**/feed/**", timeout=30000)
-            log.info("  LinkedIn login successful")
-        except Exception:
-            current_url = page.url
-            log.warning(f"  Login redirect did not reach /feed — current URL: {current_url}")
-
-            # Handle: email verification / security checkpoint
-            if "checkpoint" in current_url or "challenge" in current_url:
-                log.error("  LinkedIn security challenge detected — manual intervention needed.")
-                log.error("  Tip: Log in manually from this IP once to clear the challenge.")
-                raise RuntimeError("LinkedIn security challenge — cannot proceed headlessly.")
-
-            # Handle: already logged in or redirected elsewhere
-            if "linkedin.com" in current_url and "login" not in current_url:
-                log.info(f"  Login appears OK (landed on: {current_url})")
-            else:
-                raise RuntimeError(f"LinkedIn login failed — stuck at: {current_url}")
-
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        current_url = page.url
+        if "feed" in current_url or "mynetwork" in current_url:
+            log.info("  LinkedIn cookie auth successful ✅")
+        elif "login" in current_url or "checkpoint" in current_url:
+            raise RuntimeError(
+                "LinkedIn cookie auth failed — cookies may be expired. "
+                "Re-extract li_at and JSESSIONID from your browser and update GitHub Secrets."
+            )
+        else:
+            log.warning(f"  LinkedIn landed on unexpected URL: {current_url} — proceeding anyway")
 
     async def _search_keyword(self, page: Page, keyword: str):
         location = self.cfg["location"]
