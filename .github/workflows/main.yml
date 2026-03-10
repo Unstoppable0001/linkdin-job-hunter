@@ -7,7 +7,7 @@ on:
 
 jobs:
   hunt-jobs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 50      # Safety cap — must finish before next cron fires
 
     env:
@@ -55,10 +55,7 @@ jobs:
       - name: 📦 Install Python dependencies
         run: pip install -r requirements.txt
 
-     # ── 4. Install Playwright + Chromium ──────────────────────────────────────────
-      - name: 🌐 Fix Ubuntu 24.04 audio lib compatibility
-        run: sudo apt-get install -y libasound2t64
-
+      # ── 4. Install Playwright + Chromium (replaces manual Chrome install) ──────
       - name: 🌐 Install Playwright browsers
         run: python -m playwright install chromium --with-deps
 
