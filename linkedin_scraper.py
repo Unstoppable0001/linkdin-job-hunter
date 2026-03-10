@@ -58,7 +58,7 @@ class LinkedInScraper:
         async with httpx.AsyncClient(headers=HEADERS, timeout=20, follow_redirects=True) as client:
             for keyword in self.cfg["search_keywords"]:
                 await self._search_keyword(client, keyword.strip())
-                await asyncio.sleep(2)
+                await asyncio.sleep(6)  # longer delay between keywords
 
         log.info(f"  Scraper: collected {len(self.jobs)} jobs total")
         return self.jobs
@@ -78,11 +78,23 @@ class LinkedInScraper:
                 "start":    page_num * 25,
             }
 
-            try:
-                resp = await client.get(GUEST_SEARCH_URL, params=params)
-                resp.raise_for_status()
-            except Exception as e:
-                log.warning(f"  Search failed for '{keyword}' page {page_num + 1}: {e}")
+            # Retry with exponential backoff on 429
+            resp = None
+            for attempt in range(3):
+                try:
+                    r = await client.get(GUEST_SEARCH_URL, params=params)
+                    if r.status_code == 429:
+                        wait = 10 * (attempt + 1)
+                        log.warning(f"  429 rate limit '{keyword}' p{page_num+1} — waiting {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    r.raise_for_status()
+                    resp = r
+                    break
+                except Exception as e:
+                    log.warning(f"  Search failed for '{keyword}' page {page_num + 1}: {e}")
+                    break
+            if resp is None:
                 break
 
             soup  = BeautifulSoup(resp.text, "html.parser")
@@ -97,7 +109,7 @@ class LinkedInScraper:
                 if job:
                     self.jobs.append(job)
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(4)  # polite delay between pages
 
     async def _parse_card(self, client: httpx.AsyncClient, card, keyword: str) -> "Job | None":
         try:
@@ -132,8 +144,17 @@ class LinkedInScraper:
             # ── Fetch full job description ────────────────────────────────────
             desc = ""
             try:
-                detail_resp = await client.get(JOB_DETAIL_URL.format(job_id=job_id))
-                detail_resp.raise_for_status()
+                detail_resp = None
+                for _att in range(3):
+                    _r = await client.get(JOB_DETAIL_URL.format(job_id=job_id))
+                    if _r.status_code == 429:
+                        await asyncio.sleep(8 * (_att + 1))
+                        continue
+                    _r.raise_for_status()
+                    detail_resp = _r
+                    break
+                if detail_resp is None:
+                    raise Exception("429 after retries")
                 detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
 
                 desc_el = (
@@ -149,7 +170,7 @@ class LinkedInScraper:
                 log.debug(f"  Detail fetch failed for {job_id}: {e}")
                 salary = ""
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)  # polite delay between detail fetches
 
             return Job(
                 job_id=job_id,
