@@ -60,7 +60,17 @@ jobs:
 
       # ── 6. Run the job hunter ─────────────────────────────────────────────────
       - name: 🔍 Run AI Job Hunter
-        run: python main.py
+        # run: python main.py
+
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+       run: playwright install chromium --with-deps
+
+      - name: Run Job Hunter
+       run: python main.py
 
       # ── 7. Summary ────────────────────────────────────────────────────────────
       - name: 📊 Job Hunt Summary
