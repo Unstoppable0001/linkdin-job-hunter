@@ -11,8 +11,11 @@ load_dotenv()
 def load_config() -> dict:
     return {
         # ── LinkedIn ──────────────────────────────────────────
-        "linkedin_email":    os.getenv("LINKEDIN_EMAIL", ""),
-        "linkedin_password": os.getenv("LINKEDIN_PASSWORD", ""),
+        "linkedin_email":      os.getenv("LINKEDIN_EMAIL", ""),
+        "linkedin_password":   os.getenv("LINKEDIN_PASSWORD", ""),
+        # Cookie-based auth (preferred over email/password for cloud runners)
+        "linkedin_li_at":      os.getenv("LINKEDIN_LI_AT", ""),
+        "linkedin_jsessionid": os.getenv("LINKEDIN_JSESSIONID", ""),
         "search_keywords":   os.getenv(
             "SEARCH_KEYWORDS",
             "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer",
