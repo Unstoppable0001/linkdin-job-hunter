@@ -23,8 +23,8 @@ jobs:
       # ── LinkedIn ──────────────────────────────────────────────────────────────
       LINKEDIN_EMAIL:          aditya.243242@gmail.com
       LINKEDIN_PASSWORD:       ${{ secrets.LINKEDIN_PASSWORD }}
-      LINKEDIN_LI_AT:          "ajax:3926571326726751199"
-      LINKEDIN_JSESSIONID:     AQEDAWWAAbwEgR2EAAABnNbO6IEAAAGc-ttsgU4AoajJHgZ7CfOFgLArG5AWeuptuzrn4zmZo8y-TTKAvbCZhn924jsjb_ai1ZZC_3PCraofRHRSYnbIq6CLXIoiLTwI_DYZaqh1DwZ4scYY8WByjZW1
+      LINKEDIN_LI_AT:          ${{ inputs.linkedin_li_at || secrets.LINKEDIN_LI_AT }}
+      LINKEDIN_JSESSIONID:     ${{ inputs.linkedin_jsessionid || secrets.LINKEDIN_JSESSIONID }}
 
       # ── Search settings ───────────────────────────────────────────────────────
       SEARCH_KEYWORDS:         "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer"
