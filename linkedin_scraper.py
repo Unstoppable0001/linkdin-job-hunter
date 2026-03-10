@@ -108,6 +108,7 @@ class LinkedInScraper:
                 job = await self._parse_card(client, card, keyword)
                 if job:
                     self.jobs.append(job)
+                    log.debug(f"  Job: '{job.title}' posted_at='{job.posted_at}' scraped={job.scraped_at}")
 
             await asyncio.sleep(4)  # polite delay between pages
 
