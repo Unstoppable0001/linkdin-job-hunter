@@ -115,7 +115,13 @@ class TimeFilter:
             return reference - timedelta(days=1)
 
         # ── Absolute ISO or date strings e.g. "2024-12-01" ───────────────────
-        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",   # LinkedIn guest API: "2026-03-10T12:30:00.000Z"
+            "%Y-%m-%dT%H:%M:%SZ",       # without milliseconds
+            "%Y-%m-%dT%H:%M:%S",        # without Z
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
             try:
                 dt = datetime.strptime(raw, fmt)
                 return dt.replace(tzinfo=timezone.utc)
