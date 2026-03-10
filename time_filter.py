@@ -42,13 +42,14 @@ class TimeFilter:
             posted_dt = self.parse_posted_at(job.posted_at, reference=now)
             if posted_dt is None:
                 # Can't determine time → include optimistically
-                log.debug(f"  TimeFilter: unparseable timestamp '{job.posted_at}' — keeping job")
+                log.info(f"  TimeFilter: unparseable '{job.posted_at}' — keeping '{job.title}'")
                 fresh.append(job)
             elif posted_dt >= cutoff:
-                log.debug(f"  TimeFilter: FRESH ({job.posted_at}) → {job.title} @ {job.company}")
+                log.info(f"  TimeFilter: FRESH ({job.posted_at}) → {job.title} @ {job.company}")
                 fresh.append(job)
             else:
-                log.debug(f"  TimeFilter: STALE ({job.posted_at}) → skipped")
+                delta_min = int((now - posted_dt).total_seconds() / 60)
+                log.info(f"  TimeFilter: STALE by {delta_min}min ({job.posted_at}) → {job.title}")
                 stale.append(job)
 
         log.info(
@@ -165,3 +166,7 @@ if __name__ == "__main__":
             delta_min = "?"
             within = "⚠️  unparseable"
         print(f"{raw:<22} {str(delta_min):<22} {within}")
+
+# NOTE: Since LinkedIn's f_TPR parameter already pre-filters by time at the API level,
+# TimeFilter acts as a secondary safety net. If you see 0 fresh jobs consistently,
+# consider increasing FRESHNESS_MINUTES env var to match or exceed your cron interval.
