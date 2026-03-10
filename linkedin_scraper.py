@@ -160,11 +160,17 @@ class LinkedInScraper:
         for page_num in range(self.cfg["max_pages"]):
             paginated = url + f"&start={page_num * 25}"
             await page.goto(paginated, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(1.5, 3))
+            await asyncio.sleep(random.uniform(2, 3))
 
-            # Scroll to load all cards
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(1)
+            # Scroll to load lazy cards — ignore if page navigated mid-scroll
+            try:
+                await page.wait_for_load_state("domcontentloaded")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(1.5)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(1)
+            except Exception as e:
+                log.debug(f"  Scroll skipped (page may have navigated): {e}")
 
             job_cards = await page.query_selector_all(".job-card-container")
             if not job_cards:
