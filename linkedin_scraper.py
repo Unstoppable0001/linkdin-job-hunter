@@ -1,6 +1,7 @@
 """
 linkedin_scraper.py — Scrapes LinkedIn Jobs using Playwright (headless browser)
 Bypasses basic bot detection with realistic delays and user-agent rotation.
+Uses cookie-based auth to avoid LinkedIn's CAPTCHA on cloud IPs.
 """
 
 import asyncio
@@ -9,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
+from urllib.parse import quote
 from playwright.async_api import async_playwright, Page
 
 log = logging.getLogger(__name__)
@@ -37,7 +39,7 @@ class Job:
 
 class LinkedInScraper:
     def __init__(self, cfg: dict):
-        self.cfg = cfg
+        self.cfg  = cfg
         self.jobs: List[Job] = []
 
     async def fetch_jobs(self) -> List[Job]:
@@ -57,7 +59,6 @@ class LinkedInScraper:
                 viewport={"width": 1280, "height": 900},
                 extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
-            # Hide webdriver flag
             await context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
@@ -67,7 +68,7 @@ class LinkedInScraper:
 
             for keyword in self.cfg["search_keywords"]:
                 await self._search_keyword(page, keyword.strip())
-                await asyncio.sleep(random.uniform(2, 4))  # polite delay
+                await asyncio.sleep(random.uniform(2, 4))
 
             await browser.close()
 
@@ -76,14 +77,9 @@ class LinkedInScraper:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    async def _login(self, page: Page):
+    async def _inject_cookies(self, page: Page):
         """
-        Authenticate via saved LinkedIn session cookies (li_at + JSESSIONID).
-
-        Why cookies instead of email/password:
-        LinkedIn aggressively challenges headless browsers from cloud IPs
-        (GitHub Actions, AWS, etc.) with CAPTCHA/checkpoint pages that cannot
-        be solved programmatically. Cookie-based auth bypasses this entirely.
+        Inject LinkedIn session cookies into the browser context.
 
         How to get your cookies:
           1. Log into LinkedIn in Chrome
@@ -100,18 +96,11 @@ class LinkedInScraper:
                 "Add it as a GitHub Secret — see linkedin_scraper.py docstring."
             )
 
-        context = page.context
-
-        # Must visit the domain first so cookies are anchored correctly
-        await page.goto("https://www.linkedin.com", wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(1.0, 1.5))
-
-        # Inject cookies after domain is established
         # JSESSIONID must be wrapped in quotes e.g. "ajax:1234567890"
         if jsessionid and not jsessionid.startswith('"'):
             jsessionid = f'"{jsessionid}"'
 
-        await context.add_cookies([
+        await page.context.add_cookies([
             {
                 "name":     "li_at",
                 "value":    li_at,
@@ -132,8 +121,17 @@ class LinkedInScraper:
             },
         ])
 
-        # Navigate to feed to verify session is valid
-        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+    async def _login(self, page: Page):
+        """Authenticate via LinkedIn session cookies."""
+        # Step 1: Visit domain to anchor cookies
+        await page.goto("https://www.linkedin.com", wait_until="domcontentloaded", timeout=20000)
+        await asyncio.sleep(random.uniform(1.0, 1.5))
+
+        # Step 2: Inject cookies
+        await self._inject_cookies(page)
+
+        # Step 3: Navigate to feed to verify session
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
         current_url = page.url
@@ -145,24 +143,47 @@ class LinkedInScraper:
                 "Re-extract li_at and JSESSIONID from your browser and update GitHub Secrets."
             )
         else:
-            log.warning(f"  LinkedIn landed on unexpected URL: {current_url} — proceeding anyway")
+            log.warning(f"  LinkedIn landed on: {current_url} — proceeding anyway")
 
     async def _search_keyword(self, page: Page, keyword: str):
         location = self.cfg["location"]
-        url = (
+        base_url = (
             f"https://www.linkedin.com/jobs/search/"
-            f"?keywords={keyword.replace(' ', '%20')}"
-            f"&location={location.replace(' ', '%20')}"
-            f"&f_E=1,2"          # Experience: Internship + Entry level
+            f"?keywords={quote(keyword)}"
+            f"&location={quote(location)}"
+            f"&f_E=1%2C2"        # Experience: Internship + Entry level
             f"&sortBy=DD"        # Most recent first
         )
 
         for page_num in range(self.cfg["max_pages"]):
-            paginated = url + f"&start={page_num * 25}"
-            await page.goto(paginated, wait_until="domcontentloaded")
+            paginated = base_url + f"&start={page_num * 25}"
+            log.info(f"  Searching: '{keyword}' page {page_num + 1}")
+
+            # Retry once on failure (handles transient redirect/session drops)
+            for attempt in range(2):
+                try:
+                    await page.goto(paginated, wait_until="domcontentloaded", timeout=25000)
+
+                    # Re-authenticate if session dropped mid-run
+                    if "login" in page.url or "checkpoint" in page.url or "authwall" in page.url:
+                        log.warning("  Session dropped — re-injecting cookies and retrying")
+                        await self._inject_cookies(page)
+                        await asyncio.sleep(2)
+                        await page.goto(paginated, wait_until="domcontentloaded", timeout=25000)
+
+                    break  # success — exit retry loop
+
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"  Page load failed (attempt 1): {e} — retrying")
+                        await asyncio.sleep(4)
+                    else:
+                        log.error(f"  Skipping '{keyword}' page {page_num + 1}: {e}")
+                        break
+
             await asyncio.sleep(random.uniform(2, 3))
 
-            # Scroll to load lazy cards — ignore if page navigated mid-scroll
+            # Scroll to trigger lazy loading
             try:
                 await page.wait_for_load_state("domcontentloaded")
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -170,10 +191,12 @@ class LinkedInScraper:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(1)
             except Exception as e:
-                log.debug(f"  Scroll skipped (page may have navigated): {e}")
+                log.debug(f"  Scroll skipped: {e}")
 
             job_cards = await page.query_selector_all(".job-card-container")
+            log.info(f"  Found {len(job_cards)} cards for '{keyword}' page {page_num + 1}")
             if not job_cards:
+                log.info(f"  No cards found — stopping pagination for '{keyword}'")
                 break
 
             for card in job_cards:
@@ -195,8 +218,8 @@ class LinkedInScraper:
             posted   = await self._safe_text(detail, ".job-details-jobs-unified-top-card__posted-date")
             salary   = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-insight span", default="")
 
-            job_url  = page.url
-            job_id   = job_url.split("/jobs/view/")[-1].split("?")[0] if "/jobs/view/" in job_url else job_url[-12:]
+            job_url = page.url
+            job_id  = job_url.split("/jobs/view/")[-1].split("?")[0] if "/jobs/view/" in job_url else job_url[-12:]
 
             return Job(
                 job_id=job_id,
