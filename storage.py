@@ -1,26 +1,31 @@
 """
-storage.py — Saves matched jobs to Notion + Google Sheets concurrently.
+storage.py — Saves matched jobs to AWS S3 as both CSV and JSON.
+
+S3 layout:
+  s3://<bucket>/jobs/YYYY/MM/DD/<run_id>.json   — full job objects (JSON)
+  s3://<bucket>/jobs/YYYY/MM/DD/<run_id>.csv    — spreadsheet-friendly CSV
+  s3://<bucket>/jobs/latest.json                — last run snapshot (overwritten)
+  s3://<bucket>/jobs/latest.csv                 — last run CSV (overwritten)
 """
 
 import asyncio
+import csv
+import io
+import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import List
 
-import httpx
-import gspread
-from google.oauth2.service_account import Credentials
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from linkedin_scraper import Job
 
 log = logging.getLogger(__name__)
 
-NOTION_API = "https://api.notion.com/v1/pages"
-GSHEETS_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-SHEET_HEADERS = [
-    "Job ID", "Title", "Company", "Location",
-    "Salary", "Posted", "URL", "Scraped At"
+CSV_HEADERS = [
+    "job_id", "title", "company", "location",
+    "salary", "posted_at", "url", "scraped_at",
 ]
 
 
@@ -29,74 +34,117 @@ class JobStorage:
         self.cfg = cfg
 
     async def save_batch(self, jobs: List[Job]):
+        """Persist jobs to S3 as CSV + JSON concurrently."""
+        if not self.cfg.get("s3_bucket"):
+            log.warning("  Storage: S3_BUCKET not set — skipping storage")
+            return
         await asyncio.gather(
-            self._save_to_notion(jobs),
-            self._save_to_gsheets(jobs),
+            self._upload_json(jobs),
+            self._upload_csv(jobs),
         )
 
-    # ── Notion ────────────────────────────────────────────────────────────────
+    # ── JSON ──────────────────────────────────────────────────────────────────
 
-    async def _save_to_notion(self, jobs: List[Job]):
-        if not self.cfg.get("notion_token"):
-            log.debug("  Notion: skipped (no token configured)")
-            return
-
-        headers = {
-            "Authorization": f"Bearer {self.cfg['notion_token']}",
-            "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28",
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
-            results = await asyncio.gather(
-                *[self._notion_create_page(client, headers, job) for job in jobs],
-                return_exceptions=True,
-            )
-        ok = sum(1 for r in results if not isinstance(r, Exception))
-        log.info(f"  Notion: {ok}/{len(jobs)} saved")
-
-    async def _notion_create_page(self, client, headers, job: Job):
-        payload = {
-            "parent": {"database_id": self.cfg["notion_database_id"]},
-            "properties": {
-                "Title":    {"title":    [{"text": {"content": job.title}}]},
-                "Company":  {"rich_text": [{"text": {"content": job.company}}]},
-                "Location": {"rich_text": [{"text": {"content": job.location}}]},
-                "URL":      {"url": job.url},
-                "Salary":   {"rich_text": [{"text": {"content": job.salary or ""}}]},
-                "Posted":   {"rich_text": [{"text": {"content": job.posted_at}}]},
-                "Status":   {"select": {"name": "New"}},
-            },
-        }
-        resp = await client.post(NOTION_API, headers=headers, json=payload)
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(f"Notion {resp.status_code}: {resp.text[:200]}")
-
-    # ── Google Sheets ─────────────────────────────────────────────────────────
-
-    async def _save_to_gsheets(self, jobs: List[Job]):
-        if not self.cfg.get("gsheets_spreadsheet_id"):
-            log.debug("  Google Sheets: skipped (no spreadsheet ID configured)")
-            return
+    async def _upload_json(self, jobs: List[Job]):
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._gsheets_sync_write, jobs)
+        await loop.run_in_executor(None, self._s3_put_json, jobs)
 
-    def _gsheets_sync_write(self, jobs: List[Job]):
+    def _s3_put_json(self, jobs: List[Job]):
+        now_utc = datetime.now(timezone.utc)
+        run_id  = self._run_id()
+        payload = self._build_payload(jobs, now_utc, run_id)
+        body    = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+        dated_key  = self._dated_key(now_utc, run_id, "json")
+        latest_key = f"{self.cfg.get('s3_prefix', 'jobs')}/latest.json"
+
+        self._put(dated_key,  body, "application/json")
+        self._put(latest_key, body, "application/json")
+        log.info(f"  S3 JSON: {len(jobs)} jobs → s3://{self.cfg['s3_bucket']}/{dated_key}")
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
+
+    async def _upload_csv(self, jobs: List[Job]):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._s3_put_csv, jobs)
+
+    def _s3_put_csv(self, jobs: List[Job]):
+        now_utc = datetime.now(timezone.utc)
+        run_id  = self._run_id()
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=CSV_HEADERS)
+        writer.writeheader()
+        for j in jobs:
+            writer.writerow({
+                "job_id":     j.job_id,
+                "title":      j.title,
+                "company":    j.company,
+                "location":   j.location,
+                "salary":     j.salary,
+                "posted_at":  j.posted_at,
+                "url":        j.url,
+                "scraped_at": j.scraped_at,
+            })
+        body = buf.getvalue().encode("utf-8")
+
+        dated_key  = self._dated_key(now_utc, run_id, "csv")
+        latest_key = f"{self.cfg.get('s3_prefix', 'jobs')}/latest.csv"
+
+        self._put(dated_key,  body, "text/csv")
+        self._put(latest_key, body, "text/csv")
+        log.info(f"  S3 CSV : {len(jobs)} rows  → s3://{self.cfg['s3_bucket']}/{dated_key}")
+
+    # ── Shared helpers ────────────────────────────────────────────────────────
+
+    def _put(self, key: str, body: bytes, content_type: str):
         try:
-            creds = Credentials.from_service_account_file(
-                self.cfg["gsheets_credentials_file"],
-                scopes=GSHEETS_SCOPES,
+            self._s3().put_object(
+                Bucket=self.cfg["s3_bucket"],
+                Key=key,
+                Body=body,
+                ContentType=content_type,
             )
-            gc = gspread.authorize(creds)
-            ws = gc.open_by_key(self.cfg["gsheets_spreadsheet_id"]).worksheet(
-                self.cfg["gsheets_sheet_name"]
-            )
-            if not ws.row_values(1):
-                ws.append_row(SHEET_HEADERS)
-            ws.append_rows(
-                [[j.job_id, j.title, j.company, j.location,
-                  j.salary, j.posted_at, j.url, j.scraped_at] for j in jobs],
-                value_input_option="RAW",
-            )
-            log.info(f"  Google Sheets: {len(jobs)} rows appended")
-        except Exception as e:
-            log.error(f"  Google Sheets error: {e}")
+        except (BotoCoreError, ClientError) as e:
+            log.error(f"  S3 upload failed [{key}]: {e}")
+            raise
+
+    def _s3(self):
+        kwargs = {}
+        if self.cfg.get("aws_access_key_id"):
+            kwargs["aws_access_key_id"]     = self.cfg["aws_access_key_id"]
+            kwargs["aws_secret_access_key"] = self.cfg["aws_secret_access_key"]
+        if self.cfg.get("aws_region"):
+            kwargs["region_name"] = self.cfg["aws_region"]
+        return boto3.client("s3", **kwargs)
+
+    def _dated_key(self, now: datetime, run_id: str, ext: str) -> str:
+        prefix = self.cfg.get("s3_prefix", "jobs")
+        return f"{prefix}/{now.strftime('%Y/%m/%d')}/{run_id}.{ext}"
+
+    @staticmethod
+    def _run_id() -> str:
+        return str(uuid.uuid4())[:8]
+
+    @staticmethod
+    def _build_payload(jobs: List[Job], now_utc: datetime, run_id: str) -> dict:
+        return {
+            "run_id":     run_id,
+            "scraped_at": now_utc.isoformat(),
+            "count":      len(jobs),
+            "jobs": [
+                {
+                    "job_id":      j.job_id,
+                    "title":       j.title,
+                    "company":     j.company,
+                    "location":    j.location,
+                    "salary":      j.salary,
+                    "posted_at":   j.posted_at,
+                    "url":         j.url,
+                    "description": j.description,
+                    "scraped_at":  j.scraped_at,
+                    "tags":        j.tags,
+                }
+                for j in jobs
+            ],
+        }
