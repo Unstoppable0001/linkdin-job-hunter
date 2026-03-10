@@ -22,9 +22,6 @@ jobs:
     env:
       # ── LinkedIn ──────────────────────────────────────────────────────────────
       LINKEDIN_EMAIL:          aditya.243242@gmail.com
-      LINKEDIN_PASSWORD:       ${{ secrets.LINKEDIN_PASSWORD }}
-      LINKEDIN_LI_AT:          ${{ inputs.linkedin_li_at || secrets.LINKEDIN_LI_AT }}
-      LINKEDIN_JSESSIONID:     ${{ inputs.linkedin_jsessionid || secrets.LINKEDIN_JSESSIONID }}
 
       # ── Search settings ───────────────────────────────────────────────────────
       SEARCH_KEYWORDS:         "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer"
@@ -66,12 +63,7 @@ jobs:
       - name: 📦 Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Install Playwright + Chromium ──────────────────────────────────────
-      # ubuntu-22.04 (jammy) has libasound2 natively — --with-deps works fine.
-      - name: 🌐 Install Playwright browsers
-        run: python -m playwright install chromium --with-deps
-
-      # ── 5. Configure AWS credentials ──────────────────────────────────────────
+      # ── 4. Configure AWS credentials ──────────────────────────────────────────
       - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -83,13 +75,15 @@ jobs:
       - name: 🔍 Run AI Job Hunter
         run: python main.py
 
-      # ── 7. Upload log artifact ────────────────────────────────────────────────
-      - name: 📁 Upload job hunter log
+      # ── 7. Upload log + debug screenshots ────────────────────────────────────
+      - name: 📁 Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: job-hunter-log-${{ github.run_number }}
-          path: job_hunter.log
+          name: job-hunter-debug-${{ github.run_number }}
+          path: |
+            job_hunter.log
+            debug_*.png
           retention-days: 7
 
       # ── 8. Summary ────────────────────────────────────────────────────────────
