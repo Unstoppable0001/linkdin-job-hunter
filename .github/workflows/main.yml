@@ -1,25 +1,24 @@
-name: LinkedIn Job Hunter
+name: 🤖 AI LinkedIn Job Hunter
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # Runs daily at 8:00 AM UTC
-  workflow_dispatch:       # Allow manual trigger
+    - cron: '0 */3 * * *'   # Every 3 hours
+  workflow_dispatch:         # Manual trigger
 
 jobs:
   hunt-jobs:
     runs-on: ubuntu-latest
 
     env:
-      # LinkedIn Credentials
+      # ── LinkedIn ──────────────────────────────────────
       LINKEDIN_EMAIL:        aditya.243242@gmail.com
       LINKEDIN_PASSWORD:     ${{ secrets.LINKEDIN_PASSWORD }}
 
-      # Job Search Config
-      JOB_KEYWORDS:          ${{ vars.JOB_KEYWORDS || 'Software Engineer' }}
-      JOB_LOCATION:          ${{ vars.JOB_LOCATION || 'Remote' }}
-      JOB_MAX_RESULTS:       ${{ vars.JOB_MAX_RESULTS || '50' }}
+      # ── Telegram ─────────────────────────────────────
+      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # Amazon S3
+      # ── AWS S3 ────────────────────────────────────────
       AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION:            ap-south-1
@@ -27,46 +26,54 @@ jobs:
       S3_KEY_PREFIX:         ${{ vars.S3_KEY_PREFIX || 'Jobs' }}
 
     steps:
-      - name: Checkout repository
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install dependencies
+      # ── 3. Chrome (for LinkedIn scraper) ─────────────────────────────────────
+      - name: 🌐 Install Google Chrome
         run: |
-          pip install -r requirements.txt
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
 
-      - name: Configure AWS credentials
+      # ── 4. Dependencies ───────────────────────────────────────────────────────
+      - name: 📦 Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── 5. AWS credentials ────────────────────────────────────────────────────
+      - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ap-south-1
 
-      - name: Download existing jobs from S3
-        run: |
-          aws s3 cp s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv jobs.csv || echo "No existing file found, starting fresh."
+      # ── 6. Run the job hunter ─────────────────────────────────────────────────
+      - name: 🔍 Run AI Job Hunter
+        run: python job_hunter.py
 
-      - name: Run LinkedIn Job Hunter
-        run: |
-          python job_hunter.py
-
-      - name: Upload updated jobs to S3
-        run: |
-          aws s3 cp jobs.csv s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv
-
-      - name: Upload run log to S3
+      # ── 7. Summary ────────────────────────────────────────────────────────────
+      - name: 📊 Job Hunt Summary
         if: always()
         run: |
-          aws s3 cp job_hunter.log s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/logs/job_hunter_${{ github.run_id }}.log || true
-
-      - name: Summary
-        run: |
-          echo "### Job Hunt Complete 🎯" >> $GITHUB_STEP_SUMMARY
-          echo "- **Keywords:** ${{ vars.JOB_KEYWORDS || 'Software Engineer' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Location:** ${{ vars.JOB_LOCATION || 'Remote' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **S3 Bucket:** ${{ secrets.S3_BUCKET_NAME }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **S3 Path:** ${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv" >> $GITHUB_STEP_SUMMARY
+          echo "### 🤖 AI Job Hunt Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting       | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Roles         | DevOps / SRE / Platform |" >> $GITHUB_STEP_SUMMARY
+          echo "| Experience    | 0–2 years |" >> $GITHUB_STEP_SUMMARY
+          echo "| Window        | Last 3 hours |" >> $GITHUB_STEP_SUMMARY
+          echo "| Location      | India / Remote |" >> $GITHUB_STEP_SUMMARY
+          echo "| Storage       | S3 (${{ secrets.S3_BUCKET_NAME }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Alerts        | Telegram ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID        | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
