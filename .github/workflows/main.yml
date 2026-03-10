@@ -3,54 +3,63 @@ name: 🤖 AI LinkedIn Job Hunter
 on:
   schedule:
     - cron: '0 */3 * * *'   # Every 3 hours
-  workflow_dispatch:         # Manual trigger
+  workflow_dispatch:         # Manual trigger from GitHub UI
 
 jobs:
   hunt-jobs:
     runs-on: ubuntu-latest
+    timeout-minutes: 50      # Safety cap — must finish before next cron fires
 
     env:
-      # ── LinkedIn ──────────────────────────────────────
-      LINKEDIN_EMAIL:        aditya.243242@gmail.com
-      LINKEDIN_PASSWORD:     ${{ secrets.LINKEDIN_PASSWORD }}
+      # ── LinkedIn ──────────────────────────────────────────────────────────────
+      LINKEDIN_EMAIL:          aditya.243242@gmail.com
+      LINKEDIN_PASSWORD:       ${{ secrets.LINKEDIN_PASSWORD }}
 
-      # ── Telegram ─────────────────────────────────────
-      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+      # ── Search settings ───────────────────────────────────────────────────────
+      SEARCH_KEYWORDS:         "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer"
+      LOCATION:                "India"
+      MAX_PAGES:               "5"
+      FRESHNESS_MINUTES:       "180"   # Match cron interval (3 hours = 180 min)
 
-      # ── AWS S3 ────────────────────────────────────────
-      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION:            ap-south-1
-      S3_BUCKET_NAME:        ${{ secrets.S3_BUCKET_NAME }}
-      S3_KEY_PREFIX:         ${{ vars.S3_KEY_PREFIX || 'Jobs' }}
+      # ── Filters ───────────────────────────────────────────────────────────────
+      EXCLUDE_KEYWORDS:        "senior,lead,principal,staff,manager,director,vp,head of"
+      MAX_EXPERIENCE_YEARS:    "2"
+
+      # ── Telegram ──────────────────────────────────────────────────────────────
+      TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # ── AWS S3 ────────────────────────────────────────────────────────────────
+      AWS_ACCESS_KEY_ID:       ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY:   ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:              ap-south-1
+      S3_BUCKET:               ${{ secrets.S3_BUCKET_NAME }}   # config.py reads S3_BUCKET
+      S3_PREFIX:               "Jobs"
+
+      # ── Run as single cycle (required for GitHub Actions) ─────────────────────
+      RUN_ONCE:                "true"
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python setup ──────────────────────────────────────────────────────
+      # ── 2. Python setup ───────────────────────────────────────────────────────
       - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      # ── 3. Chrome (for LinkedIn scraper) ─────────────────────────────────────
-      - name: 🌐 Install Google Chrome
-        run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
-            | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update -q
-          sudo apt-get install -y google-chrome-stable
-
-      # ── 4. Dependencies ───────────────────────────────────────────────────────
+      # ── 3. Install Python dependencies ────────────────────────────────────────
       - name: 📦 Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── 5. AWS credentials ────────────────────────────────────────────────────
+      # ── 4. Install Playwright + Chromium (replaces manual Chrome install) ──────
+      - name: 🌐 Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
+
+      # ── 5. Configure AWS credentials ──────────────────────────────────────────
       - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -60,17 +69,18 @@ jobs:
 
       # ── 6. Run the job hunter ─────────────────────────────────────────────────
       - name: 🔍 Run AI Job Hunter
-        # run: python main.py
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: python main.py
 
-      - name: Install Playwright browsers
-       run: playwright install chromium --with-deps
+      # ── 7. Upload log artifact ────────────────────────────────────────────────
+      - name: 📁 Upload job hunter log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-hunter-log-${{ github.run_number }}
+          path: job_hunter.log
+          retention-days: 7
 
-      - name: Run Job Hunter
-       run: python main.py
-
-      # ── 7. Summary ────────────────────────────────────────────────────────────
+      # ── 8. Summary ────────────────────────────────────────────────────────────
       - name: 📊 Job Hunt Summary
         if: always()
         run: |
