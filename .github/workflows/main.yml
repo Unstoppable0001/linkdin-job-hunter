@@ -27,7 +27,7 @@ jobs:
       SEARCH_KEYWORDS:         "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer"
       LOCATION:                "India"
       MAX_PAGES:               "5"
-      FRESHNESS_MINUTES:       "180"   # Match cron interval (3 hours = 180 min)
+      FRESHNESS_MINUTES:       "1440"  # 24h — f_TPR in URL already limits to 3h; this is a safety net
 
       # ── Filters ───────────────────────────────────────────────────────────────
       EXCLUDE_KEYWORDS:        "senior,lead,principal,staff,manager,director,vp,head of"
