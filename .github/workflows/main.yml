@@ -1,0 +1,72 @@
+name: LinkedIn Job Hunter
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # Runs daily at 8:00 AM UTC
+  workflow_dispatch:       # Allow manual trigger
+
+jobs:
+  hunt-jobs:
+    runs-on: ubuntu-latest
+
+    env:
+      # LinkedIn Credentials
+      LINKEDIN_EMAIL:        ${{ secrets.LINKEDIN_EMAIL }}
+      LINKEDIN_PASSWORD:     ${{ secrets.LINKEDIN_PASSWORD }}
+
+      # Job Search Config
+      JOB_KEYWORDS:          ${{ vars.JOB_KEYWORDS || 'Software Engineer' }}
+      JOB_LOCATION:          ${{ vars.JOB_LOCATION || 'Remote' }}
+      JOB_MAX_RESULTS:       ${{ vars.JOB_MAX_RESULTS || '50' }}
+
+      # Amazon S3
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ${{ vars.AWS_REGION || 'us-east-1' }}
+      S3_BUCKET_NAME:        ${{ secrets.S3_BUCKET_NAME }}
+      S3_KEY_PREFIX:         ${{ vars.S3_KEY_PREFIX || 'Jobs' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Download existing jobs from S3
+        run: |
+          aws s3 cp s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv jobs.csv || echo "No existing file found, starting fresh."
+
+      - name: Run LinkedIn Job Hunter
+        run: |
+          python job_hunter.py
+
+      - name: Upload updated jobs to S3
+        run: |
+          aws s3 cp jobs.csv s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv
+
+      - name: Upload run log to S3
+        if: always()
+        run: |
+          aws s3 cp job_hunter.log s3://${{ secrets.S3_BUCKET_NAME }}/${{ vars.S3_KEY_PREFIX || 'Jobs' }}/logs/job_hunter_${{ github.run_id }}.log || true
+
+      - name: Summary
+        run: |
+          echo "### Job Hunt Complete 🎯" >> $GITHUB_STEP_SUMMARY
+          echo "- **Keywords:** ${{ vars.JOB_KEYWORDS || 'Software Engineer' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Location:** ${{ vars.JOB_LOCATION || 'Remote' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Bucket:** ${{ secrets.S3_BUCKET_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Path:** ${{ vars.S3_KEY_PREFIX || 'Jobs' }}/jobs.csv" >> $GITHUB_STEP_SUMMARY
