@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""
+AI LinkedIn Job Hunter
+- Scrapes LinkedIn for DevOps/SRE/Platform jobs
+- Filters 0-2 years experience
+- Filters jobs posted in last 3 hours
+- Sends Telegram alerts
+- Stores results in AWS S3
+"""
+
+import os
+import csv
+import json
+import logging
+import hashlib
+import time
+from datetime import datetime, timezone, timedelta
+from io import StringIO
+
+import boto3
+import requests
+from botocore.exceptions import ClientError
+from linkedin_jobs_scraper import LinkedinScraper
+from linkedin_jobs_scraper.events import Events, EventData, EventMetrics
+from linkedin_jobs_scraper.filters import (
+    RelevanceFilters, TimeFilters, TypeFilters, ExperienceLevelFilters
+)
+from linkedin_jobs_scraper.query import Query, QueryOptions, QueryFilters
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("job_hunter.log"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
+
+# ── Config from Environment ────────────────────────────────────────────────────
+LINKEDIN_EMAIL    = os.environ["LINKEDIN_EMAIL"]
+LINKEDIN_PASSWORD = os.environ["LINKEDIN_PASSWORD"]
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
+S3_BUCKET         = os.environ["S3_BUCKET_NAME"]
+S3_KEY_PREFIX     = os.environ.get("S3_KEY_PREFIX", "Jobs")
+AWS_REGION        = os.environ.get("AWS_REGION", "ap-south-1")
+
+# ── Job Search Settings ────────────────────────────────────────────────────────
+TARGET_ROLES = [
+    "DevOps Engineer",
+    "SRE",
+    "Site Reliability Engineer",
+    "Platform Engineer",
+    "Cloud Engineer",
+    "Infrastructure Engineer",
+    "DevOps",
+]
+
+TARGET_LOCATIONS = [
+    "India",
+    "Remote",
+]
+
+EXPERIENCE_KEYWORDS = [
+    "0-2 years", "0-1 year", "1-2 years", "fresher", "junior",
+    "entry level", "entry-level", "0 to 2", "1 to 2",
+]
+
+EXCLUDE_KEYWORDS = [
+    "5+ years", "7+ years", "10+ years", "senior", "lead", "principal",
+    "staff", "manager", "director", "head of", "3+ years", "4+ years",
+]
+
+# ── S3 Helpers ─────────────────────────────────────────────────────────────────
+s3 = boto3.client("s3", region_name=AWS_REGION)
+S3_JOBS_KEY = f"{S3_KEY_PREFIX}/jobs.json"
+S3_CSV_KEY  = f"{S3_KEY_PREFIX}/jobs.csv"
+
+def load_existing_jobs() -> dict:
+    """Load previously saved jobs from S3 (keyed by job ID)."""
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_JOBS_KEY)
+        return json.loads(obj["Body"].read().decode("utf-8"))
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            log.info("No existing jobs file in S3 — starting fresh.")
+            return {}
+        raise
+
+def save_jobs_to_s3(jobs: dict):
+    """Save all jobs as JSON and CSV to S3."""
+    # JSON
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=S3_JOBS_KEY,
+        Body=json.dumps(jobs, indent=2, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    log.info(f"Saved {len(jobs)} jobs to s3://{S3_BUCKET}/{S3_JOBS_KEY}")
+
+    # CSV
+    if jobs:
+        buf = StringIO()
+        fields = ["id", "title", "company", "location", "date_posted",
+                  "experience_level", "job_type", "link", "scraped_at"]
+        writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(jobs.values())
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=S3_CSV_KEY,
+            Body=buf.getvalue().encode("utf-8"),
+            ContentType="text/csv",
+        )
+        log.info(f"CSV saved to s3://{S3_BUCKET}/{S3_CSV_KEY}")
+
+def upload_log_to_s3():
+    """Upload the run log to S3."""
+    run_id  = os.environ.get("GITHUB_RUN_ID", datetime.now().strftime("%Y%m%d%H%M%S"))
+    log_key = f"{S3_KEY_PREFIX}/logs/job_hunter_{run_id}.log"
+    try:
+        s3.upload_file("job_hunter.log", S3_BUCKET, log_key)
+        log.info(f"Log uploaded to s3://{S3_BUCKET}/{log_key}")
+    except Exception as e:
+        log.warning(f"Could not upload log: {e}")
+
+# ── Telegram Helpers ───────────────────────────────────────────────────────────
+def send_telegram(message: str):
+    """Send a message via Telegram bot."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        log.warning(f"Telegram send failed: {e}")
+
+def format_telegram_alert(job: dict) -> str:
+    return (
+        f"🚀 <b>New Job Alert!</b>\n\n"
+        f"💼 <b>{job['title']}</b>\n"
+        f"🏢 {job['company']}\n"
+        f"📍 {job['location']}\n"
+        f"🕒 Posted: {job['date_posted']}\n"
+        f"📊 Experience: {job.get('experience_level', 'Not specified')}\n"
+        f"🔗 <a href=\"{job['link']}\">Apply Now</a>"
+    )
+
+# ── Filtering ──────────────────────────────────────────────────────────────────
+def is_within_3_hours(date_posted: str) -> bool:
+    """Return True if the job was posted within the last 3 hours."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=3)
+
+    # LinkedIn typically returns relative strings like "2 hours ago", "Just now", etc.
+    date_lower = date_posted.lower()
+    if "just now" in date_lower or "minute" in date_lower:
+        return True
+    if "hour" in date_lower:
+        try:
+            hours = int("".join(filter(str.isdigit, date_lower)))
+            return hours <= 3
+        except ValueError:
+            return True  # safe side
+    if "day" in date_lower or "week" in date_lower or "month" in date_lower:
+        return False
+    # If it's an ISO timestamp
+    try:
+        posted_dt = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
+        return posted_dt >= cutoff
+    except Exception:
+        return False
+
+def passes_experience_filter(description: str) -> bool:
+    """Return False if job clearly requires more than 2 years."""
+    desc_lower = description.lower()
+    for kw in EXCLUDE_KEYWORDS:
+        if kw.lower() in desc_lower:
+            return False
+    return True
+
+def make_job_id(link: str) -> str:
+    return hashlib.md5(link.encode()).hexdigest()
+
+# ── Scraper ────────────────────────────────────────────────────────────────────
+new_jobs: dict = {}
+existing_jobs: dict = {}
+
+def on_data(data: EventData):
+    global new_jobs, existing_jobs
+
+    job_id = make_job_id(data.link)
+
+    # Already seen this job
+    if job_id in existing_jobs:
+        return
+
+    # Must be within last 3 hours
+    if not is_within_3_hours(data.date):
+        return
+
+    # Experience filter from description
+    if not passes_experience_filter(data.description or ""):
+        return
+
+    job = {
+        "id":               job_id,
+        "title":            data.title,
+        "company":          data.company,
+        "location":         data.place,
+        "date_posted":      data.date,
+        "experience_level": data.insights[0] if data.insights else "Not specified",
+        "job_type":         data.insights[1] if len(data.insights) > 1 else "Not specified",
+        "link":             data.link,
+        "scraped_at":       datetime.now(timezone.utc).isoformat(),
+    }
+
+    new_jobs[job_id] = job
+    log.info(f"✅ New job: {data.title} @ {data.company} ({data.place})")
+
+    # Send Telegram alert immediately
+    send_telegram(format_telegram_alert(job))
+
+def on_error(error):
+    log.error(f"Scraper error: {error}")
+
+def on_end():
+    log.info("Scraper finished.")
+
+def run_scraper():
+    scraper = LinkedinScraper(
+        chrome_executable_path=None,
+        chrome_options=None,
+        headless=True,
+        max_workers=1,
+        slow_mo=1.2,
+        page_load_timeout=40,
+    )
+
+    scraper.on(Events.DATA,  on_data)
+    scraper.on(Events.ERROR, on_error)
+    scraper.on(Events.END,   on_end)
+
+    queries = [
+        Query(
+            query=role,
+            options=QueryOptions(
+                locations=TARGET_LOCATIONS,
+                apply_link=True,
+                limit=25,
+                filters=QueryFilters(
+                    relevance=RelevanceFilters.RECENT,
+                    time=TimeFilters.DAY,           # posted in last 24h; we'll filter to 3h ourselves
+                    type=[TypeFilters.FULL_TIME],
+                    experience=[
+                        ExperienceLevelFilters.INTERNSHIP,
+                        ExperienceLevelFilters.ENTRY_LEVEL,
+                        ExperienceLevelFilters.ASSOCIATE,
+                    ],
+                ),
+            ),
+        )
+        for role in TARGET_ROLES
+    ]
+
+    scraper.run(queries)
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+def main():
+    global existing_jobs
+
+    log.info("=" * 60)
+    log.info("🔍 AI LinkedIn Job Hunter — Starting")
+    log.info(f"🕒 Run time: {datetime.now(timezone.utc).isoformat()}")
+    log.info("=" * 60)
+
+    # Load existing jobs from S3
+    existing_jobs = load_existing_jobs()
+    log.info(f"Loaded {len(existing_jobs)} existing jobs from S3")
+
+    # Run scraper
+    run_scraper()
+
+    # Merge and save
+    if new_jobs:
+        merged = {**existing_jobs, **new_jobs}
+        save_jobs_to_s3(merged)
+
+        summary = (
+            f"✅ <b>Job Hunt Complete!</b>\n\n"
+            f"🆕 New jobs found: <b>{len(new_jobs)}</b>\n"
+            f"📦 Total in S3: <b>{len(merged)}</b>\n"
+            f"🕒 Run at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+        send_telegram(summary)
+        log.info(f"🎯 Done! {len(new_jobs)} new jobs found.")
+    else:
+        log.info("No new jobs found in the last 3 hours.")
+        send_telegram("🔍 Job Hunt ran — no new DevOps/SRE jobs in the last 3 hours.")
+
+    upload_log_to_s3()
+
+if __name__ == "__main__":
+    main()
