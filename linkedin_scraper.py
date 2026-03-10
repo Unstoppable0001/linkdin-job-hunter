@@ -42,10 +42,24 @@ class LinkedInScraper:
 
     async def fetch_jobs(self) -> List[Job]:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--disable-infobars",
+                    "--disable-extensions",
+                ],
+            )
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 viewport={"width": 1280, "height": 900},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            # Hide webdriver flag
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
             page = await context.new_page()
 
@@ -63,14 +77,40 @@ class LinkedInScraper:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     async def _login(self, page: Page):
-        """Log into LinkedIn once per session."""
-        await page.goto("https://www.linkedin.com/login", wait_until="networkidle")
-        await page.fill("#username", self.cfg["linkedin_email"])
-        await page.fill("#password", self.cfg["linkedin_password"])
+        """Log into LinkedIn once per session with bot-detection evasion."""
+        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(1.5, 2.5))
+
+        # Type credentials like a human (char by char with random delays)
+        await page.click("#username")
+        await page.type("#username", self.cfg["linkedin_email"], delay=random.randint(50, 120))
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+        await page.click("#password")
+        await page.type("#password", self.cfg["linkedin_password"], delay=random.randint(50, 120))
+        await asyncio.sleep(random.uniform(0.5, 1.0))
         await page.click('[type="submit"]')
-        await page.wait_for_url("**/feed/**", timeout=15000)
-        log.info("  LinkedIn login successful")
-        await asyncio.sleep(random.uniform(1, 2))
+
+        # Wait up to 30s — LinkedIn may show security check / captcha page first
+        try:
+            await page.wait_for_url("**/feed/**", timeout=30000)
+            log.info("  LinkedIn login successful")
+        except Exception:
+            current_url = page.url
+            log.warning(f"  Login redirect did not reach /feed — current URL: {current_url}")
+
+            # Handle: email verification / security checkpoint
+            if "checkpoint" in current_url or "challenge" in current_url:
+                log.error("  LinkedIn security challenge detected — manual intervention needed.")
+                log.error("  Tip: Log in manually from this IP once to clear the challenge.")
+                raise RuntimeError("LinkedIn security challenge — cannot proceed headlessly.")
+
+            # Handle: already logged in or redirected elsewhere
+            if "linkedin.com" in current_url and "login" not in current_url:
+                log.info(f"  Login appears OK (landed on: {current_url})")
+            else:
+                raise RuntimeError(f"LinkedIn login failed — stuck at: {current_url}")
+
+        await asyncio.sleep(random.uniform(1.5, 2.5))
 
     async def _search_keyword(self, page: Page, keyword: str):
         location = self.cfg["location"]
