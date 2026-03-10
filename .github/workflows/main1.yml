@@ -1,0 +1,89 @@
+name: 🤖 AI LinkedIn Job Hunter
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'   # Every 3 hours
+  workflow_dispatch:         # Manual trigger
+
+jobs:
+  hunt-jobs:
+    runs-on: ubuntu-latest
+
+    env:
+      # ── LinkedIn ──────────────────────────────────────
+      LINKEDIN_EMAIL:        aditya.243242@gmail.com
+      LINKEDIN_PASSWORD:     ${{ secrets.LINKEDIN_PASSWORD }}
+
+      # ── Telegram ─────────────────────────────────────
+      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # ── AWS S3 ────────────────────────────────────────
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ap-south-1
+      S3_BUCKET_NAME:        ${{ secrets.S3_BUCKET_NAME }}
+      S3_KEY_PREFIX:         ${{ vars.S3_KEY_PREFIX || 'Jobs' }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Chrome (for LinkedIn scraper) ─────────────────────────────────────
+      - name: 🌐 Install Google Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
+
+      # ── 4. Dependencies ───────────────────────────────────────────────────────
+      - name: 📦 Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── 5. AWS credentials ────────────────────────────────────────────────────
+      - name: 🔐 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ap-south-1
+
+      # ── 6. Run the job hunter ─────────────────────────────────────────────────
+      - name: 🔍 Run AI Job Hunter
+        # run: python main.py
+
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+       run: playwright install chromium --with-deps
+
+      - name: Run Job Hunter
+       run: python main.py
+
+      # ── 7. Summary ────────────────────────────────────────────────────────────
+      - name: 📊 Job Hunt Summary
+        if: always()
+        run: |
+          echo "### 🤖 AI Job Hunt Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting       | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Roles         | DevOps / SRE / Platform |" >> $GITHUB_STEP_SUMMARY
+          echo "| Experience    | 0–2 years |" >> $GITHUB_STEP_SUMMARY
+          echo "| Window        | Last 3 hours |" >> $GITHUB_STEP_SUMMARY
+          echo "| Location      | India / Remote |" >> $GITHUB_STEP_SUMMARY
+          echo "| Storage       | S3 (${{ secrets.S3_BUCKET_NAME }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Alerts        | Telegram ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID        | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
