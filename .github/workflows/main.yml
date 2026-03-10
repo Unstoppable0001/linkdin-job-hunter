@@ -60,7 +60,7 @@ jobs:
 
       # ── 6. Run the job hunter ─────────────────────────────────────────────────
       - name: 🔍 Run AI Job Hunter
-        run: python job_hunter.py
+        run: python main.py
 
       # ── 7. Summary ────────────────────────────────────────────────────────────
       - name: 📊 Job Hunt Summary
