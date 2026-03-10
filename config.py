@@ -44,18 +44,14 @@ def load_config() -> dict:
         "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "telegram_chat_id":   os.getenv("TELEGRAM_CHAT_ID", ""),
 
-        # # ── Google Sheets ─────────────────────────────────────
-        # "gsheets_credentials_file": os.getenv("GSHEETS_CREDENTIALS_FILE", "credentials.json"),
-        # "gsheets_spreadsheet_id":   os.getenv("GSHEETS_SPREADSHEET_ID", ""),
-        # "gsheets_sheet_name":       os.getenv("GSHEETS_SHEET_NAME", "Jobs"),
-
         # ── AWS S3 ────────────────────────────────────────────
-        # Leave AWS_ACCESS_KEY_ID / SECRET blank when using an IAM role
-        # (GitHub Actions OIDC or EC2 instance profile).
-        "s3_bucket":            os.getenv("S3_BUCKET", ""),
-        "s3_prefix":            os.getenv("S3_PREFIX", "jobs"),
-        "aws_region":           os.getenv("AWS_REGION", "us-east-1"),
-        "aws_access_key_id":    os.getenv("AWS_ACCESS_KEY_ID", ""),
+        # Tip: leave AWS_ACCESS_KEY_ID / SECRET blank when using
+        # GitHub Actions OIDC or an EC2/ECS IAM role — boto3 picks
+        # up credentials automatically from the environment.
+        "s3_bucket":             os.getenv("S3_BUCKET", ""),
+        "s3_prefix":             os.getenv("S3_PREFIX", "jobs"),
+        "aws_region":            os.getenv("AWS_REGION", "us-east-1"),
+        "aws_access_key_id":     os.getenv("AWS_ACCESS_KEY_ID", ""),
         "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY", ""),
 
         # ── Misc ──────────────────────────────────────────────
