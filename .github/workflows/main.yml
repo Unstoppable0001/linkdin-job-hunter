@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '0 */3 * * *'   # Every 3 hours
   workflow_dispatch:         # Manual trigger from GitHub UI
+    inputs:
+      linkedin_li_at:
+        description: 'LinkedIn li_at cookie (Chrome → DevTools → Application → Cookies → linkedin.com)'
+        required: false
+        type: string
+      linkedin_jsessionid:
+        description: 'LinkedIn JSESSIONID cookie'
+        required: false
+        type: string
 
 jobs:
   hunt-jobs:
@@ -14,6 +23,8 @@ jobs:
       # ── LinkedIn ──────────────────────────────────────────────────────────────
       LINKEDIN_EMAIL:          aditya.243242@gmail.com
       LINKEDIN_PASSWORD:       ${{ secrets.LINKEDIN_PASSWORD }}
+      LINKEDIN_LI_AT:          "ajax:3926571326726751199"
+      LINKEDIN_JSESSIONID:     AQEDAWWAAbwEgR2EAAABnNbO6IEAAAGc-ttsgU4AoajJHgZ7CfOFgLArG5AWeuptuzrn4zmZo8y-TTKAvbCZhn924jsjb_ai1ZZC_3PCraofRHRSYnbIq6CLXIoiLTwI_DYZaqh1DwZ4scYY8WByjZW1
 
       # ── Search settings ───────────────────────────────────────────────────────
       SEARCH_KEYWORDS:         "DevOps,SRE,Platform Engineer,Cloud Engineer,Infrastructure Engineer"
