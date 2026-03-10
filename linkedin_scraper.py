@@ -147,12 +147,19 @@ class LinkedInScraper:
 
     async def _search_keyword(self, page: Page, keyword: str):
         location = self.cfg["location"]
+        # URL modelled from real LinkedIn search:
+        # f_TPR=r10800  → posted in last N seconds (3 hrs = 10800, 24hrs = 86400)
+        # f_E=1,2       → Entry level + Internship
+        # sortBy=DD     → Most recent first
+        freshness_secs = self.cfg.get("freshness_minutes", 180) * 60
         base_url = (
             f"https://www.linkedin.com/jobs/search/"
             f"?keywords={quote(keyword)}"
             f"&location={quote(location)}"
-            f"&f_E=1%2C2"        # Experience: Internship + Entry level
-            f"&sortBy=DD"        # Most recent first
+            f"&f_TPR=r{freshness_secs}"   # only jobs posted within our freshness window
+            f"&f_E=1%2C2"                 # Entry level + Internship
+            f"&sortBy=DD"                 # Most recent first
+            f"&origin=JOB_SEARCH_PAGE_JOB_FILTER"
         )
 
         for page_num in range(self.cfg["max_pages"]):
@@ -193,8 +200,31 @@ class LinkedInScraper:
             except Exception as e:
                 log.debug(f"  Scroll skipped: {e}")
 
-            job_cards = await page.query_selector_all(".job-card-container")
+            # Try multiple selectors — LinkedIn changes class names frequently
+            job_cards = []
+            for sel in [
+                "li[data-occludable-job-id]",
+                ".job-card-container",
+                ".jobs-search-results__list-item",
+                ".scaffold-layout__list-item",
+                "[data-job-id]",
+            ]:
+                job_cards = await page.query_selector_all(sel)
+                if job_cards:
+                    log.info(f"  Selector matched: '{sel}' → {len(job_cards)} cards")
+                    break
+
             log.info(f"  Found {len(job_cards)} cards for '{keyword}' page {page_num + 1}")
+
+            # Save screenshot on first page for debugging
+            if page_num == 0:
+                try:
+                    screenshot_path = f"debug_{keyword.replace(' ', '_')}_p1.png"
+                    await page.screenshot(path=screenshot_path, full_page=False)
+                    log.info(f"  📸 Screenshot saved: {screenshot_path}")
+                except Exception as se:
+                    log.debug(f"  Screenshot failed: {se}")
+
             if not job_cards:
                 log.info(f"  No cards found — stopping pagination for '{keyword}'")
                 break
@@ -211,15 +241,46 @@ class LinkedInScraper:
 
             detail = page.locator(".jobs-details")
 
-            title    = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-title")
-            company  = await self._safe_text(detail, ".job-details-jobs-unified-top-card__company-name")
+            # Title — try multiple selectors
+            title = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-title")
+            if title == "N/A":
+                title = await self._safe_text(detail, ".jobs-unified-top-card__job-title")
+            if title == "N/A":
+                title = await self._safe_text(page, "h1")
+
+            # Company
+            company = await self._safe_text(detail, ".job-details-jobs-unified-top-card__company-name")
+            if company == "N/A":
+                company = await self._safe_text(detail, ".jobs-unified-top-card__company-name")
+
+            # Location
             location = await self._safe_text(detail, ".job-details-jobs-unified-top-card__bullet")
-            desc     = await self._safe_text(detail, ".jobs-description-content__text")
-            posted   = await self._safe_text(detail, ".job-details-jobs-unified-top-card__posted-date")
-            salary   = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-insight span", default="")
+            if location == "N/A":
+                location = await self._safe_text(detail, ".jobs-unified-top-card__bullet")
+
+            # Description
+            desc = await self._safe_text(detail, ".jobs-description-content__text")
+            if desc == "N/A":
+                desc = await self._safe_text(detail, ".jobs-description__content")
+            if desc == "N/A":
+                desc = await self._safe_text(detail, "#job-details")
+
+            # Posted date
+            posted = await self._safe_text(detail, ".job-details-jobs-unified-top-card__posted-date")
+            if posted == "N/A":
+                posted = await self._safe_text(detail, ".jobs-unified-top-card__posted-date")
+            if posted == "N/A":
+                posted = await self._safe_text(detail, "span[class*='posted-date']")
+
+            # Salary (optional)
+            salary = await self._safe_text(detail, ".job-details-jobs-unified-top-card__job-insight span", default="")
 
             job_url = page.url
             job_id  = job_url.split("/jobs/view/")[-1].split("?")[0] if "/jobs/view/" in job_url else job_url[-12:]
+
+            if title == "N/A" and company == "N/A":
+                log.debug(f"  Skipping card — could not parse title/company from {job_url}")
+                return None
 
             return Job(
                 job_id=job_id,
