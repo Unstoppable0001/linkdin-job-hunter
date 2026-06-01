@@ -1,20 +1,14 @@
 """
-people_scraper.py — Search LinkedIn People Search API.
+people_scraper.py — Search LinkedIn People Search.
 
-Uses the LinkedIn People Search (Sales Navigator / Recruiter Lite style)
-endpoint accessible via authenticated session cookies (li_at + jsessionid).
+Uses authenticated session (li_at cookie required) to hit
+the /voyager/api/search/cluster endpoint with PEOPLE filter.
 
-Search endpoint:
-  https://www.linkedin.com/voyager/api/search/cluster
-  ?pt=PEOPLE&pagingStart=0&keywords=DevOps+Engineer&geoUrn=...
-
-Fallback: scrapes the public people search page (/search?keywords=...&type=P)
-
-IMPORTANT: li_at cookie is REQUIRED for people search.
-Set LINKEDIN_LI_AT in your .env file.
+Falls back to the public /search/people/ HTML page if API fails.
 """
 
 import asyncio
+import json
 import logging
 import re
 from typing import List, Optional
@@ -27,70 +21,83 @@ from person import Person
 
 log = logging.getLogger(__name__)
 
-# ── Country name → LinkedIn geoUrn mapping ────────────────────────────────────
-# LinkedIn uses numeric geoURNs for countries/regions.
-# Format: "urn:li:geo:{id}"
+# ── Country → LinkedIn geoUrn ────────────────────────────────────────────
 GEO_URN_MAP = {
-    # Countries
-    "india":                "urn:li:geo:102713980",   # India
-    "united states":        "urn:li:geo:103644278",   # United States
-    "united kingdom":       "urn:li:geo:102614886",   # United Kingdom
-    "germany":              "urn:li:geo:103350849",   # Germany
-    "canada":               "urn:li:geo:103124627",   # Canada
-    "australia":           "urn:li:geo:101105033",   # Australia
-    "singapore":            "urn:li:geo:104014144",   # Singapore
-    "netherlands":          "urn:li:geo:102531337",   # Netherlands
-    "france":               "urn:li:geo:104103811",   # France
-    "spain":                "urn:li:geo:105145774",   # Spain
-    "brazil":               "urn:li:geo:106712446",   # Brazil
-    "japan":                "urn:li:geo:104350164",   # Japan
-    "uae":                  "urn:li:geo:104440727",   # UAE
-    "saudi arabia":         "urn:li:geo:105230723",   # Saudi Arabia
-    "south africa":         "urn:li:geo:104342144",   # South Africa
-    "mexico":               "urn:li:geo:103615591",   # Mexico
-    "ireland":              "urn:li:geo:102263331",   # Ireland
-    "sweden":               "urn:li:geo:105215376",   # Sweden
-    "norway":               "urn:li:geo:105094116",   # Norway
-    "denmark":              "urn:li:geo:104223891",   # Denmark
-    "switzerland":          "urn:li:geo:104294730",   # Switzerland
-    "austria":              "urn:li:geo:104538269",   # Austria
-    "belgium":              "urn:li:geo:104620068",   # Belgium
-    "italy":                "urn:li:geo:104270673",   # Italy
-    "portugal":             "urn:li:geo:105108694",   # Portugal
-    "poland":               "urn:li:geo:103975053",   # Poland
-    "russia":               "urn:li:geo:104508485",   # Russia
-    "china":                "urn:li:geo:104337603",   # China
-    "hong kong":            "urn:li:geo:104153697",   # Hong Kong
-    "new zealand":          "urn:li:geo:105366668",   # New Zealand
-    "malaysia":             "urn:li:geo:104076269",   # Malaysia
-    "indonesia":            "urn:li:geo:104215952",   # Indonesia
-    "philippines":          "urn:li:geo:104190618",   # Philippines
-    "thailand":             "urn:li:geo:104049755",   # Thailand
-    "vietnam":              "urn:li:geo:104336949",   # Vietnam
-    "pakistan":             "urn:li:geo:104198849",   # Pakistan
-    "bangladesh":           "urn:li:geo:104195143",   # Bangladesh
-    "sri lanka":            "urn:li:geo:104250802",   # Sri Lanka
-    "nepal":                "urn:li:geo:104176533",   # Nepal
-    "egypt":                "urn:li:geo:104169630",   # Egypt
-    "israel":               "urn:li:geo:104389403",   # Israel
-    "kenya":                "urn:li:geo:104106765",   # Kenya
-    "nigeria":              "urn:li:geo:104262228",   # Nigeria
-    "ghana":                "urn:li:geo:104198660",   # Ghana
-    "kenya":                "urn:li:geo:104106765",   # Kenya
-    "kenya":                "urn:li:geo:104106765",   # Kenya
-    # Global / All
-    "worldwide":            None,
-    "global":               None,
-    "remote":               None,
+    "india":          "urn:li:geo:102713980",
+    "united states":  "urn:li:geo:103644278",
+    "uk":             "urn:li:geo:102614886",
+    "united kingdom": "urn:li:geo:102614886",
+    "germany":        "urn:li:geo:103350849",
+    "canada":         "urn:li:geo:103124627",
+    "australia":      "urn:li:geo:101105033",
+    "singapore":      "urn:li:geo:104014144",
+    "netherlands":    "urn:li:geo:102531337",
+    "france":         "urn:li:geo:104103811",
+    "spain":          "urn:li:geo:105145774",
+    "brazil":         "urn:li:geo:106712446",
+    "japan":          "urn:li:geo:104350164",
+    "uae":            "urn:li:geo:104440727",
+    "saudi arabia":   "urn:li:geo:105230723",
+    "south africa":   "urn:li:geo:104342144",
+    "mexico":         "urn:li:geo:103615591",
+    "ireland":        "urn:li:geo:102263331",
+    "sweden":         "urn:li:geo:105215376",
+    "norway":         "urn:li:geo:105094116",
+    "denmark":        "urn:li:geo:104223891",
+    "switzerland":    "urn:li:geo:104294730",
+    "italy":          "urn:li:geo:104270673",
+    "poland":         "urn:li:geo:103975053",
+    "china":          "urn:li:geo:104337603",
+    "hong kong":      "urn:li:geo:104153697",
+    "new zealand":    "urn:li:geo:105366668",
+    "malaysia":       "urn:li:geo:104076269",
+    "indonesia":      "urn:li:geo:104215952",
+    "philippines":    "urn:li:geo:104190618",
+    "thailand":       "urn:li:geo:104049755",
+    "vietnam":        "urn:li:geo:104336949",
+    "pakistan":       "urn:li:geo:104198849",
+    "bangladesh":     "urn:li:geo:104195143",
+    "sri lanka":      "urn:li:geo:104250802",
+    "nepal":          "urn:li:geo:104176533",
+    "egypt":          "urn:li:geo:104169630",
+    "israel":         "urn:li:geo:104389403",
+    "kenya":          "urn:li:geo:104106765",
+    "nigeria":        "urn:li:geo:104262228",
+    "ghana":          "urn:li:geo:104198660",
+    "remote":         None,
+    "worldwide":      None,
+    "global":         None,
 }
 
-# ── Seniority level → LinkedIn facet values ───────────────────────────────────
-SENIORITY_FACET_MAP = {
-    "internship":  "S",
-    "entry":       "E",
-    "associate":   "A",
-    "mid":         "M",
-    "senior":      "O",
+# Country name → ISO-2 code
+COUNTRY_CODE_MAP = {
+    "india": "in", "united states": "us", "united kingdom": "gb",
+    "germany": "de", "canada": "ca", "australia": "au",
+    "singapore": "sg", "netherlands": "nl", "france": "fr",
+    "spain": "es", "brazil": "br", "japan": "jp",
+    "uae": "ae", "saudi arabia": "sa", "south africa": "za",
+    "mexico": "mx", "ireland": "ie", "sweden": "se",
+    "norway": "no", "denmark": "dk", "switzerland": "ch",
+    "italy": "it", "poland": "pl", "china": "cn",
+    "hong kong": "hk", "new zealand": "nz", "malaysia": "my",
+    "indonesia": "id", "philippines": "ph", "thailand": "th",
+    "vietnam": "vn", "pakistan": "pk", "bangladesh": "bd",
+    "sri lanka": "lk", "nepal": "np", "egypt": "eg",
+    "israel": "il", "kenya": "ke", "nigeria": "ng",
+    "ghana": "gh", "remote": "remote", "worldwide": "global",
+    "global": "global",
+}
+
+# Seniority level → LinkedIn facet value
+SENIORITY_FACET = {
+    "internship": "S",
+    "entry":      "E",
+    "associate":  "A",
+    "mid":        "M",
+    "senior":     "O",
+    "director":   "D",
+    "vp":         "V",
+    "owner":      "X",
 }
 
 HEADERS = {
@@ -102,45 +109,34 @@ HEADERS = {
     "Accept": "application/vnd.linkedin.normalized+json+2.1",
     "Accept-Language": "en-US,en;q=0.9",
     "x-li-lang": "en_US",
-    "x-li-track": "{}",
+    "x-li-track": json.dumps({"clientVersion": "1.13.8465"}),
     "Referer": "https://www.linkedin.com/search/results/people/",
     "Origin": "https://www.linkedin.com",
 }
 
 
 class LinkedInPeopleScraper:
-    """
-    Searches LinkedIn for people matching keyword + country.
-    Requires li_at cookie for authenticated access.
-    """
-
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.people: List[Person] = []
+        self._seen_keys: set = set()
 
-    # ── Public API ──────────────────────────────────────────────────────────────
+    # ── Public ──────────────────────────────────────────────────────────────
 
     async def fetch_people(self) -> List[Person]:
-        """
-        Main entry point. For each (keyword, country) pair,
-        search LinkedIn and collect profile cards.
-        """
         li_at = self.cfg.get("linkedin_li_at", "")
         jsessionid = self.cfg.get("linkedin_jsessionid", "")
 
         if not li_at and not jsessionid:
             log.warning(
-                "  ⚠️  PEOPLE_ENABLED=true but no li_at/jsessionid cookie set. "
-                "People search requires authentication. "
-                "Set LINKEDIN_LI_AT in your .env file."
+                "  ⚠️  No li_at/jsessionid cookie. People search needs auth. "
+                "Set LINKEDIN_LI_AT in .env"
             )
             return []
 
         cookies = {}
-        if li_at:
-            cookies["li_at"] = li_at
-        if jsessionid:
-            cookies["jsessionid"] = jsessionid
+        if li_at:      cookies["li_at"]      = li_at
+        if jsessionid: cookies["jsessionid"] = jsessionid
 
         async with httpx.AsyncClient(
             headers=HEADERS,
@@ -148,32 +144,73 @@ class LinkedInPeopleScraper:
             timeout=30,
             follow_redirects=True,
         ) as client:
-            for keyword in self.cfg.get("people_keywords", []):
+            for kw in self.cfg.get("people_keywords", []):
                 for country in self.cfg.get("people_countries", []):
-                    await self._search_keyword_country(
-                        client, keyword.strip(), country.strip()
+                    await self._search_one(
+                        client, kw.strip(), country.strip()
                     )
-                    await asyncio.sleep(5)  # polite delay between searches
+                    await asyncio.sleep(5)
 
-        log.info(
-            f"  People Scraper: collected {len(self.people)} profiles total"
-        )
+        log.info(f"  People Scraper: collected {len(self.people)} profiles")
         return self.people
 
-    # ── Core search ────────────────────────────────────────────────────────────
+    # ── Search ──────────────────────────────────────────────────────────────
 
-    async def _search_keyword_country(
+    async def _search_one(
         self,
         client: httpx.AsyncClient,
         keyword: str,
         country: str,
     ):
-        """
-        Search people by keyword within a specific country.
-        Uses the /search endpoint with facets for filtering.
-        """
-        max_results = self.cfg.get("people_max_results", 50)
+        max_pages = self.cfg.get("people_max_pages", 3)
+        per_page = 10
         geo_urn = self._get_geo_urn(country)
-        seniority_levels = self.cfg.get("people_seniority", ["entry", "associate"])
+        country_code = self._get_country_code(country)
 
-        #
+        log.info(f"  🔍 Searching people: '{keyword}' in {country}")
+
+        for page in range(max_pages):
+            start = page * per_page
+            try:
+                results = await self._search_api(
+                    client, keyword, geo_urn, start
+                )
+            except Exception as e:
+                log.debug(f"    API search failed: {e}, trying HTML fallback")
+                results = await self._search_html(
+                    client, keyword, country, start
+                )
+
+            if not results:
+                log.info(f"    No more results at page {page + 1}")
+                break
+
+            for r in results:
+                # Dedup by profile_id
+                if r.profile_id in self._seen_keys:
+                    continue
+                self._seen_keys.add(r.profile_id)
+
+                # Filter by seniority (per-user setting)
+                if not self._matches_seniority(r):
+                    continue
+
+                # Filter by company blacklist
+                if self._excluded_company(r):
+                    continue
+
+                r.source_keyword = keyword
+                r.source_country = country
+                self.people.append(r)
+
+            await asyncio.sleep(3)
+
+    async def _search_api(
+        self,
+        client: httpx.AsyncClient,
+        keyword: str,
+        geo_urn: Optional[str],
+        start: int,
+    ) -> List[Person]:
+        """
+        Call the voyager People
