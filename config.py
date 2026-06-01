@@ -37,7 +37,7 @@ def load_config() -> dict:
             "PEOPLE_SENIORITY",
             "internship,entry,associate",
         ).split(","),
-        "people_last_active":  int(os.getenv("PEOPLE_LAST_ACTIVE", "14")),  # days
+        "people_last_active":  int(os.getenv("PEOPLE_LAST_ACTIVE", "14")),
         "people_exclude_companies": os.getenv(
             "PEOPLE_EXCLUDE_COMPANIES",
             "recruiter,staffing,consulting,hiring,agency",
@@ -45,6 +45,7 @@ def load_config() -> dict:
         "people_resume_required": os.getenv(
             "PEOPLE_RESUME_REQUIRED", "false"
         ).lower() == "true",
+        "people_max_pages":   int(os.getenv("PEOPLE_MAX_PAGES", "3")),
 
         # ── Filters ───────────────────────────────────────────
         "role_keywords": [
@@ -82,17 +83,6 @@ def load_config() -> dict:
         "dedup_db": os.getenv("DEDUP_DB", "seen_jobs.db"),
         "people_dedup_db": os.getenv("PEOPLE_DEDUP_DB", "seen_people.db"),
     }
-
-
-
-
-
-
-
-
-
-
-
 # 11111111111111111111111111111111111111111111"""
 # config.py — Load all credentials and settings from .env
 # """
